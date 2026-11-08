@@ -1,0 +1,71 @@
+import cv2
+import time
+
+camera = cv2.VideoCapture(0)
+
+face_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
+
+face_start_time = None
+trigger_time = 0
+
+DETECTION_TIME = 0.5
+COOLDOWN = 3
+
+while True:
+
+    ret, frame = camera.read()
+
+    if not ret:
+        break
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    faces = face_cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=6,
+        minSize=(80, 80)
+    )
+
+    # Draw face boxes
+    for (x, y, w, h) in faces:
+        cv2.rectangle(
+            frame,
+            (x, y),
+            (x + w, y + h),
+            (0, 255, 0),
+            2
+        )
+
+    # FACE PRESENT
+    if len(faces) > 0:
+
+        if face_start_time is None:
+            face_start_time = time.time()
+
+        face_duration = time.time() - face_start_time
+
+        # Face has been visible long enough
+        if face_duration >= DETECTION_TIME:
+
+            # Make sure cooldown has finished
+            if time.time() - trigger_time >= COOLDOWN:
+
+                print("SYSTEM TRIGGERED")
+
+                trigger_time = time.time()
+
+    else:
+        face_start_time = None
+
+    cv2.imshow("Face Detection", frame)
+
+    key = cv2.waitKey(1) & 0xFF
+
+    if key == ord("q") or key == 27:
+        break
+
+camera.release()
+cv2.destroyAllWindows()

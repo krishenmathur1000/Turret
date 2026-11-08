@@ -1,0 +1,206 @@
+import cv2
+import numpy as np
+import os
+import time
+
+# Load YuNet detector
+detector = cv2.FaceDetectorYN.create(
+    "models/face_detection_yunet_2023mar.onnx",
+    "",
+    (320, 320)
+)
+
+# Load SFace recognizer
+recognizer = cv2.FaceRecognizerSF.create(
+    "models/face_recognition_sface_2021dec.onnx",
+    ""
+)
+
+# Load known faces
+known_faces = {}
+
+for file_name in os.listdir("known_faces"):
+    if file_name.endswith(".npy"):
+        name = file_name.replace(".npy", "")
+        embedding = np.load(os.path.join("known_faces", file_name))
+        known_faces[name] = embedding
+        print(f"Loaded: {name}")
+
+print(f"\nTotal known people: {len(known_faces)}")
+
+# Recognition settings
+SIMILARITY_THRESHOLD = 0.60
+MARGIN_THRESHOLD = 0.08
+
+# Trigger settings
+DETECTION_TIME = 0.5
+COOLDOWN = 3
+
+# Explosion settings
+EXPLOSION_DURATION = 0.7
+explosion_active = False
+explosion_start_time = 0
+explosion_center = None
+explosion_label = ""
+
+def trigger_system(name):
+    print(f"SYSTEM TRIGGERED BY: {name.upper()}")
+
+def draw_explosion(frame, center, elapsed, label):
+    progress = min(elapsed / EXPLOSION_DURATION, 1.0)
+
+    overlay = frame.copy()
+
+    max_radius = 140
+    radius = int(20 + progress * max_radius)
+
+    # Main blast
+    cv2.circle(overlay, center, radius, (0, 140, 255), -1)
+    cv2.circle(overlay, center, int(radius * 0.7), (0, 255, 255), -1)
+    cv2.circle(overlay, center, int(radius * 0.35), (255, 255, 255), -1)
+
+    # Explosion spikes
+    for angle in range(0, 360, 30):
+        rad = np.deg2rad(angle)
+        x1 = int(center[0] + np.cos(rad) * radius * 0.8)
+        y1 = int(center[1] + np.sin(rad) * radius * 0.8)
+        x2 = int(center[0] + np.cos(rad) * radius * 1.3)
+        y2 = int(center[1] + np.sin(rad) * radius * 1.3)
+        cv2.line(overlay, (x1, y1), (x2, y2), (0, 200, 255), 4)
+
+    alpha = 0.55
+    frame[:] = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+
+    text = f"BOOM! {label}"
+    text_x = max(center[0] - 100, 20)
+    text_y = max(center[1] - radius - 20, 40)
+
+    cv2.putText(
+        frame,
+        text,
+        (text_x, text_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.0,
+        (0, 0, 255),
+        3
+    )
+
+camera = cv2.VideoCapture(0)
+
+tracked_name = None
+face_start_time = None
+last_trigger_time = 0
+
+while True:
+    ret, frame = camera.read()
+
+    if not ret:
+        print("Camera error")
+        break
+
+    height, width = frame.shape[:2]
+    detector.setInputSize((width, height))
+
+    result, faces = detector.detect(frame)
+
+    current_name = None
+    current_center = None
+
+    if faces is not None:
+        for face in faces:
+            x, y, w, h = face[:4].astype(int)
+
+            aligned_face = recognizer.alignCrop(frame, face)
+            live_embedding = recognizer.feature(aligned_face)
+            live_embedding = live_embedding / np.linalg.norm(live_embedding)
+
+            scores = []
+
+            for name, known_embedding in known_faces.items():
+                similarity = recognizer.match(
+                    known_embedding,
+                    live_embedding,
+                    cv2.FaceRecognizerSF_FR_COSINE
+                )
+                scores.append((name, similarity))
+
+            scores.sort(key=lambda x: x[1], reverse=True)
+
+            best_name, best_similarity = scores[0]
+
+            if len(scores) > 1:
+                second_best_similarity = scores[1][1]
+            else:
+                second_best_similarity = 0
+
+            if (
+                best_similarity >= SIMILARITY_THRESHOLD
+                and
+                best_similarity - second_best_similarity >= MARGIN_THRESHOLD
+            ):
+                display_name = best_name.upper()
+                current_name = best_name
+                current_center = (x + w // 2, y + h // 2)
+                box_color = (0, 255, 0)
+            else:
+                display_name = "UNKNOWN"
+                box_color = (0, 0, 255)
+
+            cv2.rectangle(
+                frame,
+                (x, y),
+                (x + w, y + h),
+                box_color,
+                2
+            )
+
+            cv2.putText(
+                frame,
+                f"{display_name} {best_similarity:.2f}",
+                (x, y - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                box_color,
+                2
+            )
+
+    # Trigger logic
+    if current_name is not None:
+        if current_name != tracked_name:
+            tracked_name = current_name
+            face_start_time = time.monotonic()
+
+        face_duration = time.monotonic() - face_start_time
+
+        if face_duration >= DETECTION_TIME:
+            if time.monotonic() - last_trigger_time >= COOLDOWN:
+                trigger_system(current_name)
+                last_trigger_time = time.monotonic()
+
+                explosion_active = True
+                explosion_start_time = time.monotonic()
+                explosion_center = current_center
+                explosion_label = current_name.upper()
+    else:
+        tracked_name = None
+        face_start_time = None
+
+    # Draw explosion animation if active
+    if explosion_active and explosion_center is not None:
+        elapsed = time.monotonic() - explosion_start_time
+
+        if elapsed <= EXPLOSION_DURATION:
+            draw_explosion(frame, explosion_center, elapsed, explosion_label)
+        else:
+            explosion_active = False
+            explosion_center = None
+            explosion_label = ""
+
+    cv2.imshow("Face Recognition System", frame)
+
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord("q") or key == 27:
+        break
+
+camera.release()
+cv2.destroyAllWindows()
